@@ -294,3 +294,80 @@ describe('trace positions through aliases and extensionless imports', () => {
     expect(position(violations[0])).toEqual(['e.js:2:0', 'a.js:2:8', 'b.js'])
   })
 })
+
+describe('structured errors', () => {
+  const files = {
+    'e.js': 'import \'./a.js\'\n',
+    'a.js': '\nimport \'./b.js\'\n',
+    'b.js': 'import \'./secret.js\'\nexport const b = 1\n',
+    'secret.js': 'export const s = 1\n',
+  }
+  // `warn` left at its default, as a framework raising errors in the browser leaves it
+  const options: Partial<ImpoundOptions> = { error: true, warn: undefined, onViolation: undefined, patterns: [[/secret/, 'Server-only', ['Import it on the server']]] }
+
+  it('keeps the message to the violation and hands the rest over as fields', async () => {
+    const { load } = await devServer(files, { ...options, structuredErrors: true })
+    await load('/e.js', '/a.js')
+
+    const error = await load('/b.js').then(() => undefined, (e: Record<string, unknown>) => e)
+    expect(error).toMatchObject({
+      name: 'ImpoundError',
+      message: 'Server-only [importing `secret.js` from `b.js`]',
+      stack: 'ImpoundError: Server-only [importing `secret.js` from `b.js`]',
+      fix: 'Import it on the server',
+      // innermost first, as a stack lists its frames
+      sources: ['b.js:1:9', 'a.js:2:9', 'e.js:1:9'],
+      id: join(root!, 'b.js'),
+      plugin: 'impound',
+    })
+    expect(error?.trace).toHaveLength(3)
+    expect(error?.snippet).toMatchObject({ line: 1, column: 8 })
+    // Vite would otherwise point the error at the import in its generated code.
+    expect(error?.loc).toBeUndefined()
+    expect(error?.frame).toBeUndefined()
+  })
+
+  it('lists a step it has no position for by its file', async () => {
+    const { load } = await devServer({ ...files, 'e.js': 'import \'@/a\'\n' }, { ...options, structuredErrors: true }, [alias])
+    await load('/e.js', '/a.js')
+
+    const error = await load('/b.js').then(() => undefined, (e: Record<string, unknown>) => e)
+    expect(error?.sources).toEqual(['b.js:1:9', 'a.js:2:9', 'e.js'])
+  })
+
+  it('leaves virtual modules out of the sources', async () => {
+    const virtual: Plugin = {
+      name: 'virtual',
+      resolveId: id => id === 'virtual:entry' ? '\0virtual:entry' : undefined,
+      load: id => id === '\0virtual:entry' ? 'import \'/a.js\'\n' : undefined,
+    }
+    const { load } = await devServer(files, { ...options, structuredErrors: true }, [virtual])
+    await load('virtual:entry', '/a.js')
+
+    const error = await load('/b.js').then(() => undefined, (e: Record<string, unknown>) => e)
+    expect((error?.trace as { file: string }[]).map(step => step.file)[0]).toBe('\0virtual:entry')
+    expect(error?.sources).toEqual(['b.js:1:9', 'a.js:2:9'])
+  })
+
+  it('leaves the importing module out of sources when it is virtual', async () => {
+    const virtual: Plugin = {
+      name: 'virtual',
+      resolveId: id => id === 'virtual:entry' ? '\0virtual:entry' : undefined,
+      load: id => id === '\0virtual:entry' ? 'import \'/secret.js\'\n' : undefined,
+    }
+    const { load } = await devServer(files, { ...options, structuredErrors: true }, [virtual])
+
+    const error = await load('virtual:entry').then(() => undefined, (e: Record<string, unknown>) => e)
+    expect(error?.sources).toEqual([])
+  })
+
+  it('keeps the full message without the option', async () => {
+    const { load } = await devServer(files, options)
+    await load('/e.js', '/a.js')
+
+    const error = await load('/b.js').then(() => undefined, (e: Record<string, unknown>) => e)
+    expect(error?.message).toContain('Trace:\n  1. e.js:1:8 (entry) (import "./a.js")')
+    expect(error?.message).toContain('Suggestions:\n  - Import it on the server')
+    expect(error?.sources).toBeUndefined()
+  })
+})

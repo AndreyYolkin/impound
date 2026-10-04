@@ -121,6 +121,36 @@ ones stay unreported until it is fixed. With either mode, `onViolation` returnin
 suppresses the report but no longer allows the import: by the time the hook runs, the
 import has already been replaced by the proxy.
 
+#### Structured errors
+
+An error overlay that lays out a report itself, such as a framework's dev error page, gets
+more from the parts than from one long message. With `structuredErrors: true`, the error
+impound raises keeps its message to the violation, and carries the rest as fields:
+
+```js
+ImpoundPlugin.vite({
+  trace: true,
+  structuredErrors: true,
+  patterns: [[/\.server$/, 'Server-only import', ['Use a server function instead']]]
+})
+```
+
+| Field | Holds |
+|---|---|
+| `name` | `'ImpoundError'` |
+| `message` | `Server-only import [importing \`db.server\` from \`src/session.ts\`]` |
+| `fix` | the suggestions, one per line |
+| `sources` | `file:line:column` of the violation, then of each import above it, innermost first; a step with no known position is listed as its file, and virtual modules are left out |
+| `trace`, `snippet` | as `onViolation` receives them |
+
+On a Vite dev server the error is marked as already formatted, so Vite does not also point
+it at the import in its generated code. `error: false` still logs the full message, and
+without the option the bundler gets the full message as before.
+
+The option applies on Vite, rollup and rolldown, which receive the error as impound raises
+it. webpack, rspack, esbuild and the others get an error rebuilt from its message alone, so
+there it is ignored and the message keeps the trace.
+
 ### Named imports from a denied module
 
 A denied import is replaced by a proxy module that has only a default export.

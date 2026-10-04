@@ -371,6 +371,14 @@ describe('trace mode', () => {
     errorSpy.mockRestore()
   })
 
+  it('hands Rollup a structured error with a short message', async () => {
+    const error = await processTrace({ trace: true, structuredErrors: true, patterns: [['secret', 'Invalid import']] }) as RollupError & Record<string, unknown>
+    expect(error.message).toBe('Invalid import [importing `secret` from `middle.js`]')
+    expect(error.plugin).toBe('impound')
+    expect(error.sources).toEqual(['middle.js:1:21', 'entry.js:1:21'])
+    expect(error).not.toHaveProperty('fix')
+  })
+
   it('shows original source in snippet when code has been transformed', async () => {
     // Simulate a Vue SFC-like compiler that strips a wrapping tag and shifts lines
     const originalSource = '<script>\nimport secret from "secret"\nexport default {}\n</script>'

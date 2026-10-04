@@ -120,6 +120,12 @@ export interface ImpoundSharedOptions {
    */
   trace?: boolean | 'lazy'
   /**
+   * Keep the error message to the violation and expose its trace, snippet and suggestions
+   * as fields for an overlay to render. Supported by Vite, Rollup and Rolldown when
+   * tracing is enabled; other bundlers retain the full text message.
+   */
+  structuredErrors?: boolean
+  /**
    * Maximum depth for import traces. Only used when `trace` is enabled.
    * @default 20
    */
@@ -130,6 +136,8 @@ export type ImpoundOptions = (ImpoundSharedOptions & ImpoundMatcherOptions) | (I
 
 const RELATIVE_IMPORT_RE = /^\.\.?\//
 const EXTENSION_RE = /^\.[^./]+$/
+const STRUCTURED_FRAMEWORKS = new Set(['vite', 'rollup', 'rolldown'])
+const VIRTUAL_ID_RE = /^(?:\0|[a-z][\w+.-]*:(?![\\/]))/i
 
 const BINARY_ASSET_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|woff2?|[ot]tf|eot|mp[34]|webm|ogg|wav|flac|pdf|zip|gz|wasm)(?:\?.*)?$/i
 
@@ -151,6 +159,12 @@ function stripQuery(id: string): string {
   return queryIndex === -1 ? id : id.slice(0, queryIndex)
 }
 
+type ErrorFn = (error: string | Error) => void
+
+function toError(error: string | Error): Error {
+  return typeof error === 'string' ? new Error(error) : error
+}
+
 interface PendingViolation {
   id: string
   rawId: string
@@ -160,8 +174,9 @@ interface PendingViolation {
   suggestions?: string[]
   options: ImpoundMatcherOptions
   /** Set when the violation is reported from `resolveId`; unset when reporting is deferred to `buildEnd`. */
-  errorFn?: (msg: string) => void
+  errorFn?: ErrorFn
   useConsoleError: boolean
+  structuredErrors: boolean
   warnedMessages: Set<string> | undefined
 }
 
@@ -483,8 +498,9 @@ function reportViolation(
   trace: ImpoundTraceStep[],
   snippet: ImpoundSnippet | undefined,
   cwd: string | undefined,
-  errorFn: (msg: string) => void,
+  errorFn: ErrorFn,
   warnedMessages: Set<string> | undefined,
+  atGeneratedPosition = false,
 ): void {
   const { id, relativeImporter, options, suggestions } = violation
 
@@ -512,8 +528,44 @@ function reportViolation(
   }
   if (!warnedMessages || !warnedMessages.has(message)) {
     warnedMessages?.add(message)
-    errorFn(message)
+    if (violation.useConsoleError || !violation.structuredErrors) {
+      errorFn(message)
+    }
+    else {
+      errorFn(violationError(violation, violationInfo, cwd, atGeneratedPosition))
+    }
   }
+}
+
+/** Build an overlay-ready error while keeping the full report in onViolation. */
+function violationError(violation: PendingViolation, info: ImpoundViolationInfo, cwd: string | undefined, atGeneratedPosition: boolean): Error {
+  const message = violation.message
+  const { snippet, trace = [] } = info
+  const importer = stripQuery(violation.importer)
+  const relativeImporter = stripQuery(violation.relativeImporter)
+  const sources = VIRTUAL_ID_RE.test(importer)
+    ? []
+    : [snippet ? `${relativeImporter}:${snippet.line}:${snippet.column + 1}` : relativeImporter]
+  for (const step of trace.slice(0, -1).reverse()) {
+    if (VIRTUAL_ID_RE.test(step.file)) {
+      continue
+    }
+    const file = cwd && isAbsolute(step.file) ? relative(cwd, step.file) : step.file
+    sources.push(step.line == null ? file : `${file}:${step.line}:${step.column! + 1}`)
+  }
+  const error = Object.assign(new Error(message), {
+    name: 'ImpoundError',
+    ...violation.suggestions?.length && { fix: violation.suggestions.join('\n') },
+    sources,
+    ...info.trace && { trace: info.trace },
+    ...snippet && { snippet },
+  })
+  // Vite would otherwise attach a second location in generated import-analysis code.
+  if (atGeneratedPosition) {
+    Object.assign(error, { plugin: 'impound', pluginCode: 'IMPOUND_VIOLATION', id: importer })
+  }
+  error.stack = `${error.name}: ${message}`
+  return error
 }
 
 /** The slice of a rollup-style plugin context the lazy trace path needs. */
@@ -544,7 +596,7 @@ interface NativeGraph {
 /** A bundler graph reached through `getNativeBuildContext`, plus its error channel. */
 interface NativeLazyTarget {
   graph: LazyGraphContext
-  addError?: (message: string) => void
+  addError?: ErrorFn
 }
 
 let lexerReady = false
@@ -634,7 +686,7 @@ function nativeGraphContext(native: NativeGraph | undefined, cwd: string | undef
   const errors = compilation.errors
   return {
     // Report through the compilation's error channel.
-    addError: errors && ((message: string) => { errors.push(new Error(message)) }),
+    addError: errors && ((error) => { errors.push(toError(error)) }),
     graph: {
       getModuleInfo(id) {
         const module = byId.get(id) || byId.get(stripQuery(id))
@@ -672,7 +724,7 @@ async function enrichAndReportLazy(
   violation: PendingViolation,
   maxTraceDepth: number,
   cwd: string | undefined,
-  errorFn: (msg: string) => void,
+  errorFn: ErrorFn,
   cache: Map<string, Map<string, ImportLocation>>,
 ): Promise<void> {
   await whenLexerReady()
@@ -804,10 +856,10 @@ function enrichAndReportDev(
   }
 
   // Only the lazy path leaves errorFn unset.
-  reportViolation(violation, trace, snippet, cwd, violation.errorFn!, violation.warnedMessages)
+  reportViolation(violation, trace, snippet, cwd, violation.errorFn!, violation.warnedMessages, true)
 }
 
-export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions) => {
+export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions, meta) => {
   const matchers = 'matchers' in globalOptions ? globalOptions.matchers : [globalOptions]
   // 'eager' collects the graph during transform, 'lazy' reads the bundler's at buildEnd.
   const traceMode: 'off' | 'eager' | 'lazy' = globalOptions.trace === 'lazy'
@@ -815,6 +867,7 @@ export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions) => {
     : globalOptions.trace === true ? 'eager' : 'off'
   const traceEnabled = traceMode !== 'off'
   const maxTraceDepth = globalOptions.maxTraceDepth ?? 20
+  const structuredErrors = !!globalOptions.structuredErrors && STRUCTURED_FRAMEWORKS.has(meta.framework)
 
   const moduleImports = new Map<string, Map<string, ImportLocation>>()
   // Only modules a matcher includes can be the importer in a violation, so only those
@@ -1003,6 +1056,7 @@ export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions) => {
                 // The lazy path reports from buildEnd and binds its own error there.
                 errorFn: traceMode === 'lazy' ? undefined : (useConsoleError ? console.error : this.error.bind(this)),
                 useConsoleError,
+                structuredErrors,
                 warnedMessages,
               }
 
@@ -1210,7 +1264,7 @@ export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions) => {
         ? console.error
         : typeof ctx.error === 'function'
           ? ctx.error.bind(ctx)
-          : native?.addError || ((msg: string) => { throw new Error(msg) })
+          : native?.addError || ((error: string | Error) => { throw toError(error) })
 
       if (graph) {
         await enrichAndReportLazy(graph, violation, maxTraceDepth, cwd, errorFn, cache)
