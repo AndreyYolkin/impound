@@ -129,6 +129,7 @@ export interface ImpoundSharedOptions {
 export type ImpoundOptions = (ImpoundSharedOptions & ImpoundMatcherOptions) | (ImpoundSharedOptions & { matchers: ImpoundMatcherOptions[] })
 
 const RELATIVE_IMPORT_RE = /^\.\.?\//
+const EXTENSION_RE = /^\.[^./]+$/
 
 const BINARY_ASSET_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|woff2?|[ot]tf|eot|mp[34]|webm|ogg|wav|flac|pdf|zip|gz|wasm)(?:\?.*)?$/i
 
@@ -253,7 +254,7 @@ interface TraceGraph {
   parents: (id: string) => Iterable<string>
   isEntry: (id: string) => boolean
   /** The specifier `file` uses to import `next`, and where it appears. */
-  importOf: (file: string, next: string) => { specifier: string, line?: number, column?: number } | undefined
+  importOf: (file: string, next: string) => { specifier?: string, line?: number, column?: number } | undefined
 }
 
 /** Build an import trace from entry to the importer via BFS backwards through the graph. */
@@ -306,7 +307,7 @@ function buildTrace(graph: TraceGraph, importer: string, maxDepth: number): Impo
     if (!edge) {
       return { file }
     }
-    const step: ImpoundTraceStep = { file, import: edge.specifier }
+    const step: ImpoundTraceStep = { file, ...edge.specifier != null && { import: edge.specifier } }
     if (edge.line != null) {
       step.line = edge.line
       step.column = edge.column
@@ -363,6 +364,41 @@ function formatTrace(trace: ImpoundTraceStep[], cwd?: string): string {
     const imp = step.import ? ` (import "${step.import}")` : ''
     return `  ${i + 1}. ${file}${loc}${entry}${imp}`
   }).join('\n')
+}
+
+// Vite's SSR transform turns imports into calls such as __vite_ssr_import__("/app/foo.ts").
+const SSR_IMPORT_RE = /__vite_ssr_(?:dynamic_)?import__\(\s*(["'])(.+?)\1/g
+
+/** Find import locations in the code Vite served to either browser or SSR runner. */
+function servedImports(cache: Map<string, Map<string, ImportLocation>>, id: string, code: string): Map<string, ImportLocation> {
+  const imports = lexImports(cache, id, code)
+  if (imports.size || !code.includes('__vite_ssr_')) {
+    return imports
+  }
+  for (const match of code.matchAll(SSR_IMPORT_RE)) {
+    const start = match.index + match[0].length - match[2]!.length - 1
+    const before = code.slice(0, start)
+    const line = before.split('\n').length
+    const column = start - before.lastIndexOf('\n') - 1
+    if (!imports.has(match[2]!)) {
+      imports.set(match[2]!, { line, column, statementStart: match.index, statementEnd: match.index + match[0].length })
+    }
+  }
+  return imports
+}
+
+/** Map a served-code position back to source when its sourcemap covers the import. */
+function mapToOriginal(map: unknown, loc: { line: number, column: number }): { line?: number, column?: number } {
+  if (!(map as { mappings?: string } | undefined)?.mappings) {
+    return {}
+  }
+  try {
+    const original = originalPositionFor(new TraceMap(map as ConstructorParameters<typeof TraceMap>[0]), { line: loc.line, column: loc.column })
+    return original.line == null ? {} : { line: original.line, column: original.column! }
+  }
+  catch {
+    return {}
+  }
 }
 
 /** Render the snippet for an import, reverse-mapped to original source when a sourcemap is held. */
@@ -562,7 +598,8 @@ function lazyGraph(
       for (const [specifier, loc] of lexImports(cache, file, code)) {
         const resolved = RELATIVE_IMPORT_RE.test(specifier) ? join(stripQuery(file), '..', specifier) : specifier
         // The suffix match needs a path boundary, or `./data.js` matches `a.js`.
-        if (resolved === next || resolved === nextRelative || specifier === nextRelative || specifier.endsWith(`/${nextRelative}`)) {
+        if (resolved === next || resolved === nextRelative || specifier === nextRelative || specifier.endsWith(`/${nextRelative}`)
+          || (next.startsWith(`${resolved}.`) && EXTENSION_RE.test(next.slice(resolved.length)))) {
           return { specifier, line: loc.line, column: loc.column }
         }
       }
@@ -657,10 +694,16 @@ async function enrichAndReportLazy(
 }
 
 /** The slice of a Vite dev environment's module graph the eager path reads. */
+interface DevTransformResult {
+  code: string
+  map?: unknown
+}
 interface DevModuleNode {
   id: string | null
+  url?: string
   importers: Set<DevModuleNode>
-  transformResult?: { code: string } | null
+  transformResult?: DevTransformResult | null
+  invalidationState?: DevTransformResult | 'HARD_INVALIDATED'
 }
 interface DevModuleGraph {
   getModuleById: (id: string) => DevModuleNode | undefined
@@ -718,7 +761,37 @@ function enrichAndReportDev(
   cwd: string | undefined,
 ): void {
   const cache = new Map<string, Map<string, ImportLocation>>()
-  const trace = buildTrace(lazyGraph(devGraphContext(graph, sources), cwd, cache), violation.importer, maxTraceDepth)
+  const base = lazyGraph(devGraphContext(graph, sources), cwd, cache)
+  const finalCache = new Map<string, Map<string, ImportLocation>>()
+  const devGraph: TraceGraph = {
+    ...base,
+    importOf(file, next) {
+      const edge = base.importOf(file, next)
+      if (edge?.line != null) {
+        return edge
+      }
+      const url = graph.getModuleById(next)?.url
+      const node = graph.getModuleById(file)
+      // HMR can soft-invalidate ancestors above its update boundary without requesting
+      // them again. Vite retains their last served code in invalidationState.
+      const result = node?.transformResult ?? (typeof node?.invalidationState === 'object' ? node.invalidationState : undefined)
+      if (url && result?.code) {
+        const target = stripQuery(url).replace(/^\/?/, '/')
+        for (const [specifier, loc] of servedImports(finalCache, file, result.code)) {
+          if (!stripQuery(specifier).endsWith(target)) {
+            continue
+          }
+          const original = mapToOriginal(result.map, loc)
+          if (original.line == null) {
+            break
+          }
+          return { specifier: edge?.specifier, ...original }
+        }
+      }
+      return edge
+    },
+  }
+  const trace = buildTrace(devGraph, violation.importer, maxTraceDepth)
 
   let snippet: ImpoundSnippet | undefined
   const loc = findImportLocation(lexImports(cache, violation.importer, source.code), violation.rawId, violation.id, violation.importer, cwd)

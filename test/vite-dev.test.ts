@@ -213,3 +213,84 @@ describe('trace mode on a vite dev server', () => {
     expect(violations[0]!.snippet).toBeUndefined()
   })
 })
+
+// Resolve `@/name` to `name.js` under the root, as a Nuxt or Vite alias would.
+const alias: Plugin = { name: 'alias', resolveId: id => id.startsWith('@/') ? join(root!, `${id.slice(2)}.js`) : undefined }
+
+const position = (info: ImpoundViolationInfo | undefined) => info?.trace?.map(step => step.line == null ? relative(root!, step.file) : `${relative(root!, step.file)}:${step.line}:${step.column}`)
+
+describe('trace positions through aliases and extensionless imports', () => {
+  const files = {
+    // the aliased import is not the first, and is imported twice
+    'e.js': 'import \'./c.js\'\nimport \'@/a\'\nimport(\'@/a\')\n',
+    'c.js': 'export const c = 1\n',
+    'a.js': '\nimport \'./b\'\n',
+    'b.js': 'import \'./secret.js\'\nexport const b = 1\n',
+    'secret.js': 'export const s = 1\n',
+  }
+
+  it('names the line of an extensionless import', async () => {
+    const { violations, load } = await devServer(files, {}, [alias])
+    await load('/e.js', '/a.js', '/b.js')
+
+    // An alias leaves plain JS with no sourcemap to find its import through.
+    expect(position(violations[0])).toEqual(['e.js', 'a.js:2:8', 'b.js'])
+  })
+
+  it('finds an aliased import in the served code an update left above its boundary', async () => {
+    // SSR, whose sourcemap gives the aliased import in e.js its position
+    const { violations } = await devServer(files, {}, [alias])
+    const ssr = server!.environments.ssr
+    for (const url of ['/e.js', '/a.js', '/b.js']) {
+      await ssr.transformRequest(url)
+    }
+
+    // Invalidating a module invalidates every importer up to the entry, but only the module
+    // is requested again, so e.js keeps its served code only in its invalidation state.
+    for (const mod of ssr.moduleGraph.getModulesByFile(join(root!, 'b.js')) || []) {
+      ssr.moduleGraph.invalidateModule(mod)
+    }
+    await ssr.transformRequest('/b.js')
+
+    expect(violations).toHaveLength(2)
+    expect(position(violations[1])).toEqual(['e.js:2:0', 'a.js:2:8', 'b.js'])
+  })
+
+  it('gives no position for an importer that was itself changed', async () => {
+    const { violations } = await devServer(files, {}, [alias])
+    const ssr = server!.environments.ssr
+    for (const url of ['/e.js', '/a.js', '/b.js']) {
+      await ssr.transformRequest(url)
+    }
+
+    // A changed module is invalidated hard, so no served code is kept for it.
+    for (const file of ['e.js', 'b.js']) {
+      for (const mod of ssr.moduleGraph.getModulesByFile(join(root!, file)) || []) {
+        ssr.moduleGraph.invalidateModule(mod)
+      }
+    }
+    await ssr.transformRequest('/b.js')
+
+    expect(position(violations[1])).toEqual(['e.js', 'a.js:2:8', 'b.js'])
+  })
+
+  it('gives no position where the sourcemap does not cover the import', async () => {
+    // a map for the first line only, while the aliased import is on the second
+    const partial: Plugin = { name: 'partial', transform: (code, id) => id.endsWith('/e.js') ? { code, map: { version: 3, sources: [id], names: [], mappings: 'AAAA' } } : undefined }
+    const { violations, load } = await devServer(files, {}, [alias, partial])
+    await load('/e.js', '/a.js', '/b.js')
+
+    expect(position(violations[0])).toEqual(['e.js', 'a.js:2:8', 'b.js'])
+  })
+
+  it('finds an aliased import in the code the module runner is served', async () => {
+    const { violations } = await devServer(files, {}, [alias])
+    const ssr = server!.environments.ssr
+    for (const url of ['/e.js', '/a.js', '/b.js']) {
+      await ssr.transformRequest(url)
+    }
+
+    // The SSR sourcemap maps the runner call to the start of the import statement.
+    expect(position(violations[0])).toEqual(['e.js:2:0', 'a.js:2:8', 'b.js'])
+  })
+})
