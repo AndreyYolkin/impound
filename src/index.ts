@@ -692,13 +692,15 @@ export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions) => {
     excludeFilter: options.excludeFiles?.length
       ? createFilter(options.excludeFiles, undefined, { resolve: cwd })
       : undefined,
-    warnedMessages: options.warn !== 'always' ? new Set<string>() : undefined,
+    // Deduplicate warnings only. Every denied request must still fail when error is enabled.
+    warnedMessages: options.error === false && options.warn !== 'always' ? new Set<string>() : undefined,
   }))
 
   function includes(matcher: MatcherState, id: string): boolean {
     let included = matcher.filterCache.get(id)
     if (included === undefined) {
-      included = matcher.filter(id)
+      // createFilter rejects Rollup's \0 virtual-module marker before include can match.
+      included = matcher.filter(id.includes('\0') ? id.replaceAll('\0', '') : id)
       matcher.filterCache.set(id, included)
     }
     return included

@@ -73,6 +73,19 @@ describe('impound plugin', () => {
     errorSpy.mockRestore()
   })
 
+  it('raises the same denied import error on every request', () => {
+    const raw = ImpoundPlugin.raw({ patterns: [['secret']], error: true }, { framework: 'rollup', versions: {} })
+    const plugin = (Array.isArray(raw) ? raw : [raw]).find(p => p.name === 'impound') as any
+    const error = vi.fn((message: string) => {
+      throw new Error(message)
+    })
+    const context = { error }
+
+    expect(() => plugin.resolveId.call(context, 'secret', 'entry.js')).toThrow('Invalid import')
+    expect(() => plugin.resolveId.call(context, 'secret', 'entry.js')).toThrow('Invalid import')
+    expect(error).toHaveBeenCalledTimes(2)
+  })
+
   it('supports using matchers array syntax', async () => {
     const result = await process(code('bar'), {
       matchers: [
@@ -1254,6 +1267,50 @@ describe('trace mode (lazy) on webpack and rspack', () => {
     const message = errors.map(e => e.message).join('')
     expect(message).toContain('Server-only')
     expect(message).not.toContain('Trace:')
+  })
+})
+
+describe('virtual modules', () => {
+  const build = async (opts: Partial<ImpoundOptions>) => {
+    const bundle = await rollup({
+      input: 'entry.js',
+      onwarn() {},
+      plugins: [
+        ImpoundPlugin.rollup({ patterns: [['secret', 'Server-only']], ...opts } as ImpoundOptions),
+        {
+          name: 'virtual',
+          resolveId: id => id === 'virtual:mod' ? '\0virtual:mod' : ['entry.js', 'secret'].includes(id) ? id : undefined,
+          load: id => ({
+            'entry.js': 'import v from "virtual:mod";console.log(v)',
+            '\0virtual:mod': 'import secret from "secret";export default secret',
+            'secret': 'export default "TOP-SECRET"',
+          } as Record<string, string>)[id],
+        },
+      ],
+    })
+    return (await bundle.generate({})).output[0].code
+  }
+
+  it('blocks an import from a virtual module', async () => {
+    await expect(build({})).rejects.toThrow('Server-only [importing `secret` from `\0virtual:mod`]')
+  })
+
+  it('checks a virtual importer passed by rspack as /\\0id', async () => {
+    const raw = ImpoundPlugin.raw({ error: false, patterns: [['secret.js', 'Server-only']] }, { framework: 'rspack', versions: {} } as any)
+    const plugin = (Array.isArray(raw) ? raw : [raw]).find(p => p.name === 'impound') as any
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await plugin.resolveId.call({ error: () => {} }, 'secret.js', '/\0virtual-mod')).toBe('\0impound:proxy')
+      expect(error).toHaveBeenCalledWith('Server-only [importing `secret.js` from `/\0virtual-mod`]')
+    }
+    finally {
+      error.mockRestore()
+    }
+  })
+
+  it('respects include for virtual modules', async () => {
+    const code = await build({ include: [/^src\//] })
+    expect(code).toContain('TOP-SECRET')
   })
 })
 
