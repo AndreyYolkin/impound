@@ -1,0 +1,12 @@
+{
+  "name": "impound-virtual-imports-repro",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "impound": "1.2.0",
+    "rollup": "4.63.1"
+  }
+}
