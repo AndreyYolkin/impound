@@ -1,5 +1,6 @@
 import process from 'node:process'
 import { ImpoundPlugin } from 'impound'
+import { rolldown } from 'rolldown'
 import { rollup } from 'rollup'
 
 function modules(contents) {
@@ -17,14 +18,16 @@ function modules(contents) {
   }
 }
 
-async function build(impound, contents) {
+async function build(framework, contents) {
   let bundle
   try {
-    bundle = await rollup({
+    const bundleWith = framework === 'rollup' ? rollup : rolldown
+    const impound = ImpoundPlugin[framework]({ patterns: [['secret', 'Server-only import']] })
+    bundle = await bundleWith({
       input: 'entry.js',
       plugins: [impound, modules(contents)],
     })
-    await bundle.generate({ format: 'es' })
+    await bundle.generate({ format: framework === 'rollup' ? 'es' : 'esm' })
     return 'allowed'
   }
   catch (error) {
@@ -37,16 +40,15 @@ async function build(impound, contents) {
   }
 }
 
-const virtual = await build(
-  ImpoundPlugin.rollup({ patterns: [['secret', 'Server-only import']] }),
-  {
-    'entry.js': 'import value from "virtual:entry"; console.log(value)',
-    '\0virtual:entry': 'import value from "secret"; export default value',
-    'secret': 'export default "TOP_SECRET"',
-  },
-)
-process.stdout.write(`Import from virtual module: ${virtual} (expected: blocked)\n`)
+const contents = {
+  'entry.js': 'import value from "virtual:entry"; console.log(value)',
+  '\0virtual:entry': 'import value from "secret"; export default value',
+  'secret': 'export default "TOP_SECRET"',
+}
 
-if (virtual !== 'blocked') {
-  process.exitCode = 1
+for (const framework of ['rollup', 'rolldown']) {
+  const result = await build(framework, contents)
+  process.stdout.write(`${framework}: ${result} (expected: blocked)\n`)
+  if (result !== 'blocked')
+    process.exitCode = 1
 }
