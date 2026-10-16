@@ -1,11 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import process from 'node:process'
 import { ImpoundPlugin } from 'impound'
 import { createServer } from 'vite'
 
-const root = mkdtempSync(join(tmpdir(), 'impound-vite-retry-'))
+const root = mkdtempSync(join(realpathSync(process.cwd()), '.impound-vite-retry-'))
 const entry = join(root, 'entry.js')
 writeFileSync(entry, 'import value from "./secret.js"; console.log(value)')
 writeFileSync(join(root, 'secret.js'), 'export default "TOP_SECRET"')
@@ -39,7 +38,9 @@ try {
   server.environments.client.moduleGraph.invalidateAll()
   const second = await load()
 
-  process.stdout.write(`Vite dev requests: ${first}, ${second} (expected: blocked, blocked)\n`)
+  process.stdout.write(`First request (forbidden import): ${first}\n`)
+  process.stdout.write(`Second request (same import after edit): ${second}\n`)
+  process.stdout.write('Expected: blocked on both requests\n')
   if (first !== 'blocked' || second !== 'blocked')
     process.exitCode = 1
 }
