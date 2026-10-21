@@ -1,0 +1,13 @@
+{
+  "name": "impound-vite-dev-trace-repro",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node index.mjs",
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "impound": "1.2.1",
+    "vite": "8.3.4"
+  }
+}
