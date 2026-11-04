@@ -2,9 +2,10 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import process from 'node:process'
-import { ImpoundPlugin } from 'impound'
+import { pathToFileURL } from 'node:url'
 import { createServer } from 'vite'
 
+const { ImpoundPlugin } = await import(process.env.IMPOUND_ENTRY ? pathToFileURL(process.env.IMPOUND_ENTRY).href : 'impound')
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'impound-vite-dev-trace-')))
 const reports = []
 let server

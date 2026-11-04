@@ -1,9 +1,11 @@
-# Missing import chains and positions with webpack and rspack
+# Missing import chains in webpack and rspack dev traces
 
 Use Node 26 and run `npm ci && npm run dev`. This uses published `impound@1.2.1`, webpack 5.111.1, and rspack 2.2.7.
 
-Each case builds `entry.js -> a.js -> b.js -> secret.js`. Impound denies `secret.js`. The script checks both `trace: true` (Nuxt dev mode) and `trace: 'lazy'` (Nuxt build mode) with direct, extensionless, aliased, and mixed imports.
+Each case builds `entry.js -> a.js -> b.js -> secret.js`. Impound denies `secret.js`. The script checks `trace: true` (Nuxt dev mode) with direct, extensionless, aliased, and mixed imports.
 
-The expected trace for each case is `entry.js:1:8 -> a.js:1:8 -> b.js`. The current release gives a chain without positions for direct imports in `trace: true`, no chain for extensionless or aliased imports in `trace: true`, and a chain without positions for extensionless imports in `trace: 'lazy'`.
+Every case should report the full `entry.js -> a.js -> b.js` chain. Direct imports and aliases with an extension should also have positions (`entry.js:1:8 -> a.js:1:8 -> b.js`). The published release gives a chain without positions for direct imports and no chain for extensionless or aliased imports. Positions for extensionless imports are covered by a separate lazy-trace fix.
 
-The script prints each result and exits with code 1 until all chains and positions match the expectation. It also checks that each compilation really reports the denied import.
+The script prints all eight results and exits with code 1 until the chains and applicable positions match. It also checks that each compilation really reports the denied import.
+
+To check a locally built impound candidate, set `IMPOUND_ENTRY` to the absolute path of its `dist/index.mjs` before running `npm run dev`.
