@@ -1,6 +1,6 @@
 # Missing import chain in Vite dev
 
-Use Node 24 and run `npm install && npm run dev`. The example uses published `impound@1.2.1` and Vite 8.3.4.
+Use Node 24 or 26 and run `npm ci && npm run dev`. The example uses published `impound@1.2.1` and Vite 8.3.5.
 
 The script starts a Vite dev server and requests `entry.js`, `a.js`, and `b.js`. The modules form this chain:
 
