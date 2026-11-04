@@ -86,8 +86,39 @@ async function devServer(files: Record<string, string>, options: Partial<Impound
 
 // Steps carry the ids Vite gave the modules, which are absolute.
 const chain = (info: ImpoundViolationInfo | undefined) => info?.trace?.map(step => relative(root!, step.file))
+function positions(info: ImpoundViolationInfo | undefined) {
+  return info?.trace?.map(step => step.line == null
+    ? relative(root!, step.file)
+    : `${relative(root!, step.file)}:${step.line}:${step.column}`)
+}
 
 describe('trace mode on a vite dev server', () => {
+  it('does not retain a position from an importer changed by HMR', async () => {
+    const { violations } = await devServer({
+      'src/e.js': 'import "./c.js"\nimport "@/a"\nimport("@/a")\n',
+      'src/c.js': 'export const c = 1\n',
+      'src/a.js': '\nimport "./b"\n',
+      'src/b.js': 'import "./secret.js"\n',
+      'src/secret.js': 'export const secret = true\n',
+    }, {}, [], true)
+    const ssr = server!.environments.ssr
+    for (const url of ['/src/e.js', '/src/a.js', '/src/b.js']) {
+      await ssr.transformRequest(url)
+    }
+    expect(positions(violations[0])).toEqual(['src/e.js:3:7', 'src/a.js:2:8', 'src/b.js'])
+    writeFileSync(join(root!, 'src/e.js'), 'export const changed = true\n')
+    for (const mod of ssr.moduleGraph.getModulesByFile(join(root!, 'src/e.js')) || []) {
+      ssr.moduleGraph.invalidateModule(mod)
+    }
+    for (const mod of ssr.moduleGraph.getModulesByFile(join(root!, 'src/b.js')) || []) {
+      ssr.moduleGraph.invalidateModule(mod)
+    }
+    await ssr.transformRequest('/src/b.js')
+
+    expect(violations).toHaveLength(2)
+    expect(positions(violations[1])).toEqual(['src/e.js', 'src/a.js:2:8', 'src/b.js'])
+  })
+
   it('reports the chain from the requested entry', async () => {
     const { violations, load } = await devServer({
       'e.js': 'import \'./a.js\'\n',

@@ -698,6 +698,7 @@ interface DevModuleNode {
   importers: Set<DevModuleNode>
   importedModules: Set<DevModuleNode>
   transformResult?: { code: string } | null
+  invalidationState?: { code: string } | 'HARD_INVALIDATED'
 }
 interface DevModuleGraph {
   getModuleById: (id: string) => DevModuleNode | undefined
@@ -753,11 +754,16 @@ function devTraceGraph(
   return {
     ...base,
     importOf(file, next) {
+      const node = graph.getModuleById(file)
+      // The graph can still contain an old edge until Vite transforms a changed
+      // importer again. Its previous source must not supply a location for it.
+      if (node?.invalidationState === 'HARD_INVALIDATED') {
+        return
+      }
       const direct = base.importOf(file, next)
       if (direct) {
         return direct
       }
-      const node = graph.getModuleById(file)
       const code = context.getModuleInfo(file)?.code
       /* v8 ignore next 3 -- an importer edge normally has both a node and transformed code */
       if (!node || !code) {
