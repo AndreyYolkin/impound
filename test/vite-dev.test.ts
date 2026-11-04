@@ -1,8 +1,8 @@
 import type { Plugin, ViteDevServer } from 'vite'
 import type { ImpoundOptions, ImpoundViolationInfo } from '../src'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'pathe'
+import { dirname, join, relative } from 'pathe'
 import { createServer } from 'vite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ImpoundPlugin } from '../src'
@@ -32,9 +32,10 @@ afterEach(async () => {
   }
 })
 
-async function devServer(files: Record<string, string>, options: Partial<ImpoundOptions> = {}, plugins: Plugin[] = []) {
+async function devServer(files: Record<string, string>, options: Partial<ImpoundOptions> = {}, plugins: Plugin[] = [], aliases = false) {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'impound-dev-')))
   for (const [file, code] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, file)), { recursive: true })
     writeFileSync(join(root, file), code)
   }
   const violations: ImpoundViolationInfo[] = []
@@ -42,6 +43,7 @@ async function devServer(files: Record<string, string>, options: Partial<Impound
     root,
     configFile: false,
     logLevel: 'silent',
+    resolve: aliases ? { alias: { '@': join(root, 'src'), '~': join(root, 'src') } } : undefined,
     server: { middlewareMode: true, ws: false, watch: null },
     optimizeDeps: { noDiscovery: true, include: [] },
     plugins: [
@@ -120,6 +122,22 @@ describe('trace mode on a vite dev server', () => {
     expect(chain(violations.at(-1))).toEqual(['e.js', 'a.js', 'b.js'])
   })
 
+  it('keeps a chain after an entry becomes part of an import cycle', async () => {
+    const { violations, load, edit } = await devServer({
+      'main.js': 'import \'./router.js\'\nexport const app = {}\n',
+      'router.js': 'import \'./page.js\'\n',
+      'page.js': 'import { app } from \'./main.js\'\nimport \'./secret.js\'\n',
+      'secret.js': 'export const s = 1\n',
+    })
+    await load('/main.js', '/router.js', '/page.js')
+    expect(chain(violations[0])).toEqual(['main.js', 'router.js', 'page.js'])
+
+    edit('page.js', 'import { app } from \'./main.js\'\nimport \'./secret.js\'\n')
+    await load('/page.js')
+    expect(chain(violations.at(-1))).toEqual(['main.js', 'router.js', 'page.js'])
+    expect(violations.at(-1)?.message).not.toContain('(entry)')
+  })
+
   it('maps the snippet back to the original source', async () => {
     const banner: Plugin = {
       name: 'banner',
@@ -145,6 +163,113 @@ describe('trace mode on a vite dev server', () => {
     expect(violations[0]!.snippet).toMatchObject({ line: 1, column: 7 })
     expect(violations[0]!.snippet?.text).toContain('> 1 | import \'./secret.js\'')
     expect(violations[0]!.snippet?.text).not.toContain('banner')
+  })
+
+  it('uses the map before a later plugin changes the code', async () => {
+    const shift: Plugin = {
+      name: 'shift',
+      enforce: 'post',
+      transform(code, id) {
+        if (!id.endsWith('/b.js')) {
+          return
+        }
+        return {
+          code: `// added\n// added\n${code}`,
+          map: { version: 3, sources: [id], sourcesContent: [code], names: [], mappings: ';;AAAA;AACA;AACA' },
+        }
+      },
+    }
+    const { violations, load } = await devServer({
+      'e.js': 'import \'./b.js\'\n',
+      'b.js': 'export const x = 1\nexport const y = 2\nimport \'./secret.js\'\n',
+      'secret.js': 'export const s = 1\n',
+    }, {}, [shift])
+    await load('/e.js', '/b.js')
+
+    expect(violations[0]!.snippet?.line).toBe(3)
+    expect(violations[0]!.snippet?.text).toContain('> 3 | import \'./secret.js\'')
+  })
+
+  it('walks through modules excluded by the matcher', async () => {
+    const { violations, load } = await devServer({
+      'e.js': 'import \'./a.js\'\n',
+      'a.js': 'import \'./b.js\'\n',
+      'b.js': 'import \'./secret.js\'\n',
+      'secret.js': 'export const s = 1\n',
+    }, { include: [/b\.js$/] })
+    await load('/e.js', '/a.js', '/b.js')
+
+    expect(chain(violations[0])).toEqual(['e.js', 'a.js', 'b.js'])
+    expect(violations[0]!.snippet?.line).toBe(1)
+  })
+
+  it('locates alias and virtual imports in a dev chain', async () => {
+    const virtual: Plugin = {
+      name: 'virtual-middle',
+      resolveId(id) {
+        if (id === 'virtual:middle') {
+          return '\0virtual:middle'
+        }
+      },
+      load(id) {
+        if (id === '\0virtual:middle') {
+          return 'import \'/src/a.ts\'\n'
+        }
+      },
+    }
+    const { violations, load } = await devServer({
+      'src/e.ts': 'import \'virtual:middle\'\n',
+      'src/a.ts': 'import \'./helper.ts\'\nimport { b } from \'@/b\'\nexport const a = b\n',
+      'src/b.ts': 'export const b = 1\nimport \'./helper.ts\'\nimport \'@/other/secret\'\nimport { s } from \'~/secret\'\nexport const x = s\n',
+      'src/helper.ts': 'export const helper = 1\n',
+      'src/other/secret.ts': 'export const other = 1\n',
+      'src/secret.ts': 'export const s = 1\n',
+    }, { patterns: [[/^src\/secret$/, 'Server-only']] }, [virtual], true)
+    await load('/src/e.ts', 'virtual:middle', '/src/a.ts', '/src/b.ts')
+
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.trace).toMatchObject([
+      { file: join(root!, 'src/e.ts'), import: 'virtual:middle', line: 1 },
+      { file: '\0virtual:middle', import: '/src/a.ts', line: 1 },
+      { file: join(root!, 'src/a.ts'), import: '@/b', line: 2 },
+      { file: join(root!, 'src/b.ts') },
+    ])
+    expect(violations[0]!.message).toContain('virtual:middle')
+    expect(violations[0]!.message).not.toContain('\0')
+    expect(violations[0]!.snippet?.text).toContain('> 4 | import { s } from \'~/secret\'')
+  })
+
+  it('omits a snippet when two aliases could match the same denied target', async () => {
+    const { violations, load } = await devServer({
+      'src/e.ts': 'import \'./b.ts\'\n',
+      'src/b.ts': 'import \'~/secret\'\nimport \'@/secret\'\n',
+      'src/secret.ts': 'export const s = 1\n',
+    }, {}, [], true)
+    await load('/src/e.ts', '/src/b.ts')
+
+    expect(violations).toHaveLength(2)
+    expect(violations.every(info => info.snippet === undefined)).toBe(true)
+  })
+
+  it('does not assign an alias position when a later plugin adds an import', async () => {
+    const inject: Plugin = {
+      name: 'inject',
+      enforce: 'post',
+      transform(code, id) {
+        return id.endsWith('/a.ts') ? `${code}import './helper.ts'\n` : undefined
+      },
+    }
+    const { violations, load } = await devServer({
+      'src/e.ts': 'import \'./a.ts\'\n',
+      'src/a.ts': 'import \'@/b\'\n',
+      'src/b.ts': 'import \'./secret.ts\'\n',
+      'src/helper.ts': 'export const helper = 1\n',
+      'src/secret.ts': 'export const s = 1\n',
+    }, {}, [inject], true)
+    await load('/src/e.ts', '/src/a.ts', '/src/b.ts')
+
+    expect(violations[0]!.trace?.map(step => relative(root!, step.file))).toEqual(['src/e.ts', 'src/a.ts', 'src/b.ts'])
+    expect(violations[0]!.trace?.[1]).toEqual({ file: join(root!, 'src/a.ts') })
   })
 
   it('fails the request with the chain when error is enabled', async () => {
@@ -211,5 +336,32 @@ describe('trace mode on a vite dev server', () => {
 
     expect(chain(violations[0])).toEqual(['e.js', 'b.js'])
     expect(violations[0]!.snippet).toBeUndefined()
+  })
+
+  it('reports a bundledDev violation before the server closes', async () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'impound-bundled-')))
+    writeFileSync(join(root, 'index.html'), '<script type="module" src="/e.js"></script>\n')
+    writeFileSync(join(root, 'e.js'), 'import \'./b.js\'\n')
+    writeFileSync(join(root, 'b.js'), 'import \'./secret.js\'\n')
+    writeFileSync(join(root, 'secret.js'), 'export const s = 1\n')
+    const violations: ImpoundViolationInfo[] = []
+    server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      experimental: { bundledDev: true },
+      server: { port: 0, ws: false, watch: null },
+      plugins: [ImpoundPlugin.vite({
+        cwd: root,
+        trace: true,
+        error: false,
+        patterns: [[/secret/, 'Server-only']],
+        onViolation: (info) => { violations.push(info) },
+      })],
+    })
+    await server.listen()
+    await fetch(server.resolvedUrls!.local[0]!, { headers: { 'sec-fetch-dest': 'document' } })
+    await vi.waitFor(() => expect(violations).toHaveLength(1), { timeout: 10_000 })
+    expect(chain(violations[0])).toEqual(['index.html', 'e.js', 'b.js'])
   })
 })

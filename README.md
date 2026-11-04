@@ -85,9 +85,12 @@ A narrow `include` therefore keeps eager tracing cheap: only modules that could 
 importer in a violation are retained.
 
 On a Vite dev server, `trace: true` records no graph of its own. It keeps each module's
-latest transform output, and on a violation it walks Vite's module graph, which Vite
-updates on every edit. So nothing is parsed until a violation happens, and the chain
-follows imports that have moved since the server started.
+latest transform output and builds sourcemaps for modules covered by `include`. On a
+violation it parses the import chain and walks Vite's module graph, which Vite updates
+on every edit. The chain therefore follows imports that have moved since the server
+started. Vite's experimental `bundledDev` mode does not populate the dev module graph,
+so violations there are reported at the bundle's `buildEnd`, after the full import chain
+is available and before the server closes.
 
 `trace: 'lazy'` records nothing, and reads the bundler's own module graph when a
 violation actually happens.
