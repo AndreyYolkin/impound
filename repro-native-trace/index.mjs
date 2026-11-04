@@ -17,6 +17,7 @@ const cases = {
   extensionless: ['import "./a"\n', 'import "./b"\n'],
   alias: ['import "@/a.js"\n', 'import "@/b.js"\n'],
   mixed: ['import "@/a"\n', 'import "./b"\n'],
+  named: ['import "./a.js"\n', 'import "./b.js"\n'],
 }
 const expectedFiles = 'entry.js -> a.js -> b.js'
 const expectedWithPositions = 'entry.js:1:8 -> a.js:1:8 -> b.js'
@@ -29,7 +30,9 @@ for (const [bundlerName, bundler] of bundlers) {
       for (const [file, code] of Object.entries({
         'entry.js': entryCode,
         'a.js': aCode,
-        'b.js': 'import "./secret.js"\n',
+        'b.js': caseName === 'named'
+          ? 'import { secret } from "./secret.js"\nconsole.log(secret)\n'
+          : 'import "./secret.js"\n',
         'secret.js': 'export const secret = true\n',
       })) {
         writeFileSync(join(root, file), code)
@@ -66,8 +69,8 @@ for (const [bundlerName, bundler] of bundlers) {
       }).join(' -> ') ?? '(missing)'
       const denied = stats.compilation.errors.filter(error => error.message.includes('Denied')).length
       process.stdout.write(`${bundlerName} ${caseName}: ${chain}\n`)
-      if (reports.length !== 1 || denied !== 1 || files !== expectedFiles
-        || ((caseName === 'direct' || caseName === 'alias') && chain !== expectedWithPositions)) {
+      if (reports.length !== 1 || denied !== 1 || stats.compilation.errors.length !== 1 || files !== expectedFiles
+        || ((caseName === 'direct' || caseName === 'alias' || caseName === 'named') && chain !== expectedWithPositions)) {
         failed = true
       }
     }
