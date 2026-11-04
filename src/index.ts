@@ -11,7 +11,7 @@ const PROXY_ID = '\0impound:proxy'
 const PROXY_ID_RE = /^\0impound:proxy$/
 
 // based on https://github.com/unjs/mocked-exports
-const PROXY_CODE = `
+const PROXY_FACTORY_CODE = `
 function createMock(name, overrides = {}) {
   const proxyFn = function () {};
   proxyFn.prototype.name = name;
@@ -32,8 +32,9 @@ function createMock(name, overrides = {}) {
   });
   return proxy;
 }
-export default createMock("mock");
 `.trim()
+const PROXY_CODE = `${PROXY_FACTORY_CODE}\nexport default createMock("mock");`
+const NATIVE_PROXY_CODE = `${PROXY_FACTORY_CODE}\nmodule.exports = createMock("mock");`
 
 export interface ImpoundTraceStep {
   /** The file path in this step of the import chain. */
@@ -744,10 +745,11 @@ export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions, meta
       filter: { id: PROXY_ID_RE },
       handler(id: string) {
         if (id === PROXY_ID) {
-          // Named imports from the proxy would fail the bundler's export check, and that
-          // error names `impound:proxy` instead of the offending import. Rollup only:
-          // rolldown, webpack, rspack and esbuild ignore `syntheticNamedExports`.
-          return { code: PROXY_CODE, syntheticNamedExports: 'default' } as unknown as string
+          // Native trace:true reports at buildEnd. Its CommonJS proxy permits named
+          // imports without adding a linker error before the impound report.
+          // Rollup uses syntheticNamedExports for the ESM proxy.
+          const code = nativeBuilder && globalOptions.trace === true ? NATIVE_PROXY_CODE : PROXY_CODE
+          return { code, syntheticNamedExports: 'default' } as unknown as string
         }
       },
     },
