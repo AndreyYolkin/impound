@@ -1279,6 +1279,64 @@ describe('trace mode (lazy) on webpack and rspack', () => {
   })
 })
 
+describe('trace: true on webpack and rspack', () => {
+  it.each(['webpack', 'rspack'] as const)('uses the native graph for %s import chains', async (framework) => {
+    const files = {
+      '/p/entry.js': 'import "@/a"',
+      '/p/a.js': 'import "./b"',
+      '/p/b.js': 'import "./secret.js"',
+    }
+    const modules = Object.entries(files).map(([resource, code]) => ({
+      resource,
+      originalSource: () => ({ source: () => code }),
+    }))
+    const incoming = new Map<unknown, { originModule: unknown }[]>([
+      [modules[0], [{ originModule: null }]],
+      [modules[1], [{ originModule: modules[0] }]],
+      [modules[2], [{ originModule: modules[1] }]],
+    ])
+    const errors: Error[] = []
+    const violations: ImpoundViolationInfo[] = []
+    const context = {
+      getNativeBuildContext: () => ({
+        framework,
+        compilation: {
+          errors,
+          modules,
+          moduleGraph: { getIncomingConnections: (module: unknown) => incoming.get(module) ?? [] },
+        },
+      }),
+    }
+    const resolveContext = { ...context, error: vi.fn() }
+    const raw = ImpoundPlugin.raw({
+      cwd: '/p',
+      trace: true,
+      patterns: [[/secret/, 'Denied']],
+      onViolation: info => void violations.push(info),
+    }, { framework, versions: {}, [framework]: { compiler: {} } } as any)
+    const plugins = Array.isArray(raw) ? raw : [raw]
+    const impound = plugins.find(plugin => plugin.name === 'impound')!
+    const trace = plugins.find(plugin => plugin.name === 'impound:trace')
+
+    await (impound as any).resolveId.call(resolveContext, 'entry.js', undefined, { isEntry: true })
+    await (impound as any).resolveId.call(resolveContext, '@/a', '/p/entry.js')
+    await (impound as any).resolveId.call(resolveContext, './b', '/p/a.js')
+    if (trace) {
+      const transform = typeof trace.transform === 'function' ? trace.transform : trace.transform?.handler
+      for (const [file, code] of Object.entries(files)) {
+        await (transform as any).call(resolveContext, code, file)
+      }
+    }
+    await (impound as any).resolveId.call(resolveContext, './secret.js', '/p/b.js')
+    await (impound as any).buildEnd.call(context)
+
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.trace?.map(step => step.file)).toEqual(Object.keys(files))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]!.message).toContain('Denied')
+  })
+})
+
 describe('virtual modules', () => {
   const build = async (opts: Partial<ImpoundOptions>) => {
     const bundle = await rollup({

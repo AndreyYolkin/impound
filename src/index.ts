@@ -638,10 +638,13 @@ async function enrichAndReportLazy(
   reportViolation(violation, trace, snippet, cwd, errorFn, violation.warnedMessages)
 }
 
-export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions) => {
+export const ImpoundPlugin = createUnplugin<ImpoundOptions>((globalOptions, meta) => {
   const matchers = 'matchers' in globalOptions ? globalOptions.matchers : [globalOptions]
-  // 'eager' collects the graph during transform, 'lazy' reads the bundler's at buildEnd.
-  const traceMode: 'off' | 'eager' | 'lazy' = globalOptions.trace === 'lazy'
+  // Native builders only expose resolved import edges in their compilation graph.
+  // Read it at buildEnd even for trace: true, so aliases and extensionless imports
+  // connect to the actual modules instead of their unresolved specifiers.
+  const nativeBuilder = meta.framework === 'webpack' || meta.framework === 'rspack'
+  const traceMode: 'off' | 'eager' | 'lazy' = globalOptions.trace === 'lazy' || (nativeBuilder && globalOptions.trace === true)
     ? 'lazy'
     : globalOptions.trace === true ? 'eager' : 'off'
   const traceEnabled = traceMode !== 'off'
