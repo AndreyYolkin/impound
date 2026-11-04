@@ -41,7 +41,9 @@ export default {
 
 ### Import Tracing
 
-Enable `trace: true` to get rich violation diagnostics with full import chains and code snippets. When enabled, errors are deferred to `buildEnd` so the complete module graph can be collected first.
+Enable `trace: true` to get violation diagnostics with import chains and code snippets.
+With Vite's dev module graph, a violation is reported during the module request; other
+bundlers may report it after the importer is transformed or at `buildEnd` if it is still pending.
 
 ```js
 ImpoundPlugin.rollup({
@@ -77,34 +79,36 @@ Suggestions:
 
 #### Choosing a trace mode
 
-`trace: true` records the import graph as modules are transformed. Every module gets
-parsed, and modules an `include` pattern covers also get their sourcemap built and their
-source retained, so snippets can point at original source.
+Outside Vite dev, `trace: true` parses transformed modules to record import edges.
+Modules covered by an `include` pattern also retain their transformed source and any
+available sourcemap, so snippets can point at original source when the map provides it.
 
-A narrow `include` therefore keeps eager tracing cheap: only modules that could be the
-importer in a violation are retained.
+A narrow `include` limits source and sourcemap retention; import edges are still
+collected from other modules so traces can reach the entry point.
 
-On a Vite dev server, `trace: true` records no graph of its own. It keeps each module's
-latest transform output and builds sourcemaps for modules covered by `include`. On a
-violation it parses the import chain and walks Vite's module graph, which Vite updates
-on every edit. The chain therefore follows imports that have moved since the server
-started. Vite's experimental `bundledDev` mode does not populate the dev module graph,
-so violations there are reported at the bundle's `buildEnd`, after the full import chain
-is available and before the server closes.
+On a Vite dev server, `trace: true` reads Vite's module graph instead of recording a
+separate graph. It keeps transformed source for modules in that graph, reads available
+sourcemaps for modules covered by `include`, and parses the import chain only when a
+violation is reported. Vite refreshes graph edges when affected modules are requested
+and transformed after an edit. If an importer is hard-invalidated, its old import
+position is omitted from the trace until it is transformed again. Vite's experimental
+`bundledDev` mode does not populate the dev module graph, so violations there are
+reported at the bundle's `buildEnd`, before the server closes.
 
-`trace: 'lazy'` records nothing, and reads the bundler's own module graph when a
-violation actually happens.
+`trace: 'lazy'` does not collect a separate graph during transforms. It holds
+violations until `buildEnd`, then reads the bundler's graph and parses the reported
+import chains where that graph is available.
 
 |  | `true` | `'lazy'` |
 |---|---|---|
-| Import chain | yes | yes, including dynamic imports |
-| Code snippet | yes | yes |
-| Snippet shows | original source | original source on webpack and rspack, otherwise the code the bundler holds |
-| Per-module cost | parse, plus sourcemap + retain within `include` | none |
+| Import chain | yes | yes when the bundler exposes a graph, including dynamic imports |
+| Code snippet | when the import position is available | when the graph and source are available |
+| Snippet shows | original source when available from a sourcemap, otherwise transformed source | original source on webpack and rspack, otherwise the code the bundler holds |
+| During transform | parse modules outside Vite dev; in Vite dev, retain source for graph modules; read sourcemaps within `include` | no separate graph collection |
 | Bundlers | all | all except esbuild |
 
-Lazy reports from `buildEnd`, and a dev server only calls that when it shuts down, so
-keep `true` for dev:
+Lazy reports from `buildEnd`. In regular Vite dev mode, that runs when the server shuts
+down, so keep `true` for dev:
 
 ```js
 ImpoundPlugin.vite({
@@ -119,10 +123,10 @@ Lazy reads the graph through `getModuleInfo` on rollup, vite and rolldown, and t
 no module graph to a plugin, so there lazy reports the plain message with no chain or
 snippet.
 
-With `error: true`, lazy reports the first violation and fails the build there, so later
-ones stay unreported until it is fixed. With either mode, `onViolation` returning `false`
-suppresses the report but no longer allows the import: by the time the hook runs, the
-import has already been replaced by the proxy.
+With `error: true`, a reported lazy violation fails the build; whether later violations
+are also reported depends on the bundler. With either mode, `onViolation` returning
+`false` suppresses the report but no longer allows the import: by the time the hook
+runs, the import has already been replaced by the proxy.
 
 ### Named imports from a denied module
 
