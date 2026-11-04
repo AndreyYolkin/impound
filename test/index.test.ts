@@ -1565,6 +1565,66 @@ describe('trace mode (lazy) graph walking', () => {
 })
 
 describe('trace mode (lazy)', () => {
+  it.each([
+    ['relative', './a', './b'],
+    ['alias', '@/a', '@/b'],
+  ])('locates extensionless %s imports in a real build', async (_name, entryImport, middleImport) => {
+    const files = {
+      'entry.js': `import '${entryImport}'`,
+      'a.js': `import '${middleImport}'`,
+      'b.js': 'import "./secret.js"',
+      'secret.js': 'export const secret = true',
+    }
+    const violations: ImpoundViolationInfo[] = []
+    await buildWithTrace(files, [], {
+      trace: 'lazy',
+      patterns: [[/secret/, 'Denied']],
+      error: false,
+      onViolation: info => void violations.push(info),
+    }, [{
+      name: 'resolve-extensionless',
+      resolveId(id: string) {
+        const bare = id.startsWith('./') ? id.slice(2) : id.startsWith('@/') ? id.slice(2) : id
+        const resolved = `${bare}.js`
+        return resolved in files ? resolved : undefined
+      },
+    }])
+
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.trace).toMatchObject([
+      { file: 'entry.js', import: entryImport, line: 1, column: 8 },
+      { file: 'a.js', import: middleImport, line: 1, column: 8 },
+      { file: 'b.js' },
+    ])
+  })
+
+  it('does not attribute an ambiguous alias to the wrong module', async () => {
+    const files = {
+      'entry.js': 'import "~/a"\nimport "@/a"',
+      'other/a.js': 'export const other = true',
+      'a.js': 'import "./secret.js"',
+      'secret.js': 'export const secret = true',
+    }
+    const violations: ImpoundViolationInfo[] = []
+    await buildWithTrace(files, [], {
+      trace: 'lazy',
+      patterns: [[/secret/, 'Denied']],
+      error: false,
+      onViolation: info => void violations.push(info),
+    }, [{
+      name: 'two-aliases',
+      resolveId(id: string) {
+        if (id === '~/a')
+          return 'other/a.js'
+        if (id === '@/a')
+          return 'a.js'
+      },
+    }])
+
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.trace).toEqual([{ file: 'entry.js' }, { file: 'a.js' }])
+  })
+
   it('reports under the same plugin name as eager mode', async () => {
     const eager = await processTrace({ trace: true, patterns: [['secret']] }) as RollupError
     const lazy = await processTrace({ trace: 'lazy', patterns: [['secret']] }) as RollupError

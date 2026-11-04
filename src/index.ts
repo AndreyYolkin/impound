@@ -129,6 +129,7 @@ export interface ImpoundSharedOptions {
 export type ImpoundOptions = (ImpoundSharedOptions & ImpoundMatcherOptions) | (ImpoundSharedOptions & { matchers: ImpoundMatcherOptions[] })
 
 const RELATIVE_IMPORT_RE = /^\.\.?\//
+const EXTENSION_RE = /^\.[^./]+$/
 
 const BINARY_ASSET_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|ico|woff2?|[ot]tf|eot|mp[34]|webm|ogg|wav|flac|pdf|zip|gz|wasm)(?:\?.*)?$/i
 
@@ -541,13 +542,30 @@ function lazyGraph(
         return
       }
       const nextRelative = isAbsolute(next) && cwd ? relative(cwd, next) : next
+      const nextWithoutExtension = nextRelative.replace(/\.[^./]+$/, '')
+      let suffixMatch: { specifier: string, line: number, column: number } | undefined
+      let ambiguousSuffix = false
       for (const [specifier, loc] of lexImports(cache, file, code)) {
         const resolved = RELATIVE_IMPORT_RE.test(specifier) ? join(stripQuery(file), '..', specifier) : specifier
-        // The suffix match needs a path boundary, or `./data.js` matches `a.js`.
-        if (resolved === next || resolved === nextRelative || specifier === nextRelative || specifier.endsWith(`/${nextRelative}`)) {
+        const extensionlessRelative = next.startsWith(`${resolved}.`) && EXTENSION_RE.test(next.slice(resolved.length))
+        const extensionlessAlias = !RELATIVE_IMPORT_RE.test(specifier)
+          && nextWithoutExtension !== nextRelative
+          && specifier.endsWith(`/${nextWithoutExtension}`)
+        if (resolved === next || resolved === nextRelative || specifier === nextRelative || extensionlessRelative) {
           return { specifier, line: loc.line, column: loc.column }
         }
+        // A suffix cannot identify which alias resolved to this module when two
+        // imports have the same tail. Leave the edge unlocated in that case.
+        if (specifier.endsWith(`/${nextRelative}`) || extensionlessAlias) {
+          if (suffixMatch) {
+            ambiguousSuffix = true
+          }
+          else {
+            suffixMatch = { specifier, line: loc.line, column: loc.column }
+          }
+        }
       }
+      return ambiguousSuffix ? undefined : suffixMatch
     },
   }
 }
