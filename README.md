@@ -16,3 +16,7 @@ Import chain: (missing)
 ```
 
 Expected: the report contains `entry.js -> a.js -> b.js`. The script exits with code 1 while the chain is missing. With the proposed Vite dev graph change, it prints the chain and exits successfully.
+
+# To check a local fix
+
+Set `IMPOUND_ENTRY` to the absolute path of a locally built `dist/index.mjs` before running `npm run dev`.
